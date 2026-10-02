@@ -1,0 +1,630 @@
+---
+import { CHOICES } from "../config/choices";
+import { activityTheme } from "../config/activity-theme";
+
+const choicesJson = JSON.stringify(CHOICES);
+// BASE_URL is "/" locally and reflects the mount path Webflow injects
+// at build time. Use withBase() for client-side asset and API paths.
+const baseUrl = import.meta.env.BASE_URL.replace(/\/$/, "");
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>What will you build next?</title>
+    <!-- WF Visual Sans is Webflow's custom brand typeface (licensed, download-only).
+         Poppins/Inter are the brand guide's own sanctioned Google Font fallback,
+         so we use those instead of shipping custom font files. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Poppins:wght@600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body data-reveal-effect={activityTheme.revealEffect} style={`--activity-accent: ${activityTheme.accentColor}`}>
+    <main class="wrap">
+      <header class="intro">
+        <h1>What will you build next?</h1>
+        <p>Pick a project direction and meet your build artifact.</p>
+      </header>
+
+      <p id="loading-message" class="status-line" hidden>Loading your previous result…</p>
+
+      <form id="choice-form" class="choice-form">
+        <fieldset>
+          <legend>Choose a project direction</legend>
+          <div class="choice-grid">
+            {
+              CHOICES.map((choice) => (
+                <label class="choice-card" style={`--choice-accent: ${choice.accentColor}`}>
+                  <input type="radio" name="choice" value={choice.id} required />
+                  <span class="choice-label">{choice.label}</span>
+                  <span class="choice-example">{choice.exampleProject}</span>
+                </label>
+              ))
+            }
+          </div>
+        </fieldset>
+        <button type="submit" id="submit-btn">Reveal my build artifact</button>
+      </form>
+
+      <div id="status" role="status" aria-live="polite" class="visually-hidden"></div>
+
+      <section id="error-banner" role="alert" class="error-banner" hidden>
+        <p id="error-message"></p>
+        <button type="button" id="retry-btn">Try again</button>
+      </section>
+
+      <section id="reveal" class="reveal" hidden aria-live="polite">
+        <div id="reveal-card" class="reveal-card">
+          <span id="reveal-art-wrap" class="reveal-art-wrap">
+            <img id="reveal-art" alt="" class="reveal-art" />
+          </span>
+          <div class="reveal-copy">
+            <p class="reveal-eyebrow">You picked: <span id="reveal-choice-label"></span></p>
+            <h2>Meet your build artifact: <span id="reveal-artifact-name"></span></h2>
+            <p id="reveal-description"></p>
+            <p class="reveal-example"><strong>What you could build:</strong> <span id="reveal-example"></span></p>
+            <a id="reveal-resource-link" class="resource-link" href="#" target="_blank" rel="noopener noreferrer">
+              <span id="reveal-resource-label"></span>
+              <span aria-hidden="true">↗</span>
+              <span class="visually-hidden"> (opens in a new tab)</span>
+            </a>
+          </div>
+        </div>
+
+        <div class="results-panel">
+          <h3>How everyone has answered so far</h3>
+          <p id="sample-note" class="sample-note"></p>
+          <ul id="results-list" class="results-list"></ul>
+          <button type="button" id="start-over-btn" class="start-over">Choose a different direction</button>
+        </div>
+      </section>
+    </main>
+
+    <script type="application/json" id="choices-data" set:html={choicesJson} />
+    <script type="application/json" id="base-url-data" set:html={JSON.stringify(baseUrl)} />
+
+    <script>
+      type ChoiceId = "interactive-tool" | "live-data" | "signed-in-portal" | "standalone-app";
+
+      interface Choice {
+        id: ChoiceId;
+        label: string;
+        artifactName: string;
+        description: string;
+        exampleProject: string;
+        buildDetails: string;
+        resourceLabel: string;
+        resourceUrl: string;
+        accentColor: string;
+        artworkSrc: string;
+        artworkAlt: string;
+      }
+
+      interface ResultsPayload {
+        totals: Record<ChoiceId, number>;
+        totalCount: number;
+        mostPopularIds: ChoiceId[];
+        sampleBaselineCount: number;
+      }
+
+      const STORAGE_KEY = "wwybn:choiceId";
+
+      const choicesDataEl = document.getElementById("choices-data");
+      const CHOICES: Choice[] = JSON.parse(choicesDataEl?.textContent ?? "[]");
+      const choicesById = new Map(CHOICES.map((c) => [c.id, c]));
+
+      const baseUrlDataEl = document.getElementById("base-url-data");
+      const BASE_URL: string = JSON.parse(baseUrlDataEl?.textContent ?? '""');
+      const withBase = (path: string) => `${BASE_URL}${path}`;
+
+      const form = document.getElementById("choice-form") as HTMLFormElement;
+      const submitBtn = document.getElementById("submit-btn") as HTMLButtonElement;
+      const statusEl = document.getElementById("status") as HTMLElement;
+      const loadingMessage = document.getElementById("loading-message") as HTMLElement;
+      const errorBanner = document.getElementById("error-banner") as HTMLElement;
+      const errorMessage = document.getElementById("error-message") as HTMLElement;
+      const retryBtn = document.getElementById("retry-btn") as HTMLButtonElement;
+      const revealSection = document.getElementById("reveal") as HTMLElement;
+      const revealCard = document.getElementById("reveal-card") as HTMLElement;
+      const revealArt = document.getElementById("reveal-art") as HTMLImageElement;
+      const revealChoiceLabel = document.getElementById("reveal-choice-label") as HTMLElement;
+      const revealArtifactName = document.getElementById("reveal-artifact-name") as HTMLElement;
+      const revealDescription = document.getElementById("reveal-description") as HTMLElement;
+      const revealExample = document.getElementById("reveal-example") as HTMLElement;
+      const revealResourceLink = document.getElementById("reveal-resource-link") as HTMLAnchorElement;
+      const revealResourceLabel = document.getElementById("reveal-resource-label") as HTMLElement;
+      const sampleNote = document.getElementById("sample-note") as HTMLElement;
+      const resultsList = document.getElementById("results-list") as HTMLElement;
+      const startOverBtn = document.getElementById("start-over-btn") as HTMLButtonElement;
+
+      let lastAction: (() => void) | null = null;
+
+      function setStatus(message: string) {
+        statusEl.textContent = message;
+      }
+
+      function showError(message: string, retry: () => void) {
+        errorMessage.textContent = message;
+        errorBanner.hidden = false;
+        lastAction = retry;
+      }
+
+      function clearError() {
+        errorBanner.hidden = true;
+        lastAction = null;
+      }
+
+      // ACTIVITY STARTER
+      // Builds one text-only results row. Extend it with a percentage bar.
+      // Use the selection and leader values to distinguish relevant rows.
+      function buildResultRow(
+        choice: Choice,
+        count: number,
+        percent: number,
+        isSelected: boolean,
+        isSoleLeader: boolean,
+        isTiedLeader: boolean
+      ): HTMLLIElement {
+        const li = document.createElement("li");
+        li.className = "results-row";
+        li.dataset.selected = String(isSelected);
+        li.dataset.leader = isSoleLeader ? "sole" : isTiedLeader ? "tied" : "";
+
+        const leaderSuffix = isSoleLeader
+          ? " — most popular"
+          : isTiedLeader
+            ? " — tied for most popular"
+            : "";
+
+        li.innerHTML = `
+          <div class="results-row-head">
+            <span>${choice.label}${leaderSuffix}</span>
+            <span>${count} response${count === 1 ? "" : "s"} (${percent}%)</span>
+          </div>
+        `;
+        return li;
+      }
+
+      function renderResults(payload: ResultsPayload, selectedChoiceId: ChoiceId | null) {
+        sampleNote.textContent = `Results started with ${payload.sampleBaselineCount} sample responses and update as people respond.`;
+        resultsList.innerHTML = "";
+        for (const choice of CHOICES) {
+          const count = payload.totals[choice.id] ?? 0;
+          const percent = payload.totalCount > 0 ? Math.round((count / payload.totalCount) * 100) : 0;
+          const isSelected = choice.id === selectedChoiceId;
+          const isSoleLeader =
+            payload.mostPopularIds.length === 1 && payload.mostPopularIds[0] === choice.id;
+          const isTiedLeader =
+            payload.mostPopularIds.length > 1 && payload.mostPopularIds.includes(choice.id);
+
+          resultsList.appendChild(
+            buildResultRow(choice, count, percent, isSelected, isSoleLeader, isTiedLeader)
+          );
+        }
+      }
+
+      function renderReveal(choiceId: ChoiceId, payload: ResultsPayload) {
+        const choice = choicesById.get(choiceId);
+        if (!choice) return;
+
+        revealArt.src = withBase(choice.artworkSrc);
+        revealArt.alt = choice.artworkAlt;
+        revealCard.style.setProperty("--choice-accent", choice.accentColor);
+        revealChoiceLabel.textContent = choice.label;
+        revealArtifactName.textContent = choice.artifactName;
+        revealDescription.textContent = choice.description;
+        revealExample.textContent = choice.buildDetails;
+        revealResourceLink.href = choice.resourceUrl;
+        revealResourceLabel.textContent = choice.resourceLabel;
+        renderResults(payload, choiceId);
+
+        form.hidden = true;
+        revealSection.hidden = false;
+      }
+
+      async function fetchResults(): Promise<ResultsPayload> {
+        const res = await fetch(withBase("/api/results"));
+        if (!res.ok) throw new Error("results-failed");
+        return res.json();
+      }
+
+      async function submitChoice(choiceId: ChoiceId): Promise<ResultsPayload> {
+        const res = await fetch(withBase("/api/submit"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ choiceId }),
+        });
+        if (!res.ok) throw new Error("submit-failed");
+        return res.json();
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const selected = form.querySelector<HTMLInputElement>('input[name="choice"]:checked');
+        if (!selected) return;
+
+        const choiceId = selected.value as ChoiceId;
+        clearError();
+        submitBtn.disabled = true;
+        form.querySelectorAll("input").forEach((input) => (input.disabled = true));
+        setStatus("Saving your response…");
+
+        try {
+          const payload = await submitChoice(choiceId);
+          window.localStorage.setItem(STORAGE_KEY, choiceId);
+          setStatus("Your response was saved.");
+          renderReveal(choiceId, payload);
+        } catch {
+          submitBtn.disabled = false;
+          form.querySelectorAll("input").forEach((input) => (input.disabled = false));
+          setStatus("");
+          showError("We couldn't save your response. Please try again.", () => form.requestSubmit());
+        }
+      });
+
+      retryBtn.addEventListener("click", () => {
+        clearError();
+        lastAction?.();
+      });
+
+      startOverBtn.addEventListener("click", () => {
+        window.localStorage.removeItem(STORAGE_KEY);
+        revealSection.hidden = true;
+        form.hidden = false;
+        form.reset();
+        // form.reset() restores field values but not the disabled state the
+        // submit handler set to block double-submission — clear it explicitly
+        // or the choices stay greyed out until a full page reload.
+        submitBtn.disabled = false;
+        form.querySelectorAll("input").forEach((input) => (input.disabled = false));
+        setStatus("");
+      });
+
+      async function restorePreviousChoice(choiceId: ChoiceId) {
+        loadingMessage.hidden = false;
+        form.hidden = true;
+        try {
+          const payload = await fetchResults();
+          loadingMessage.hidden = true;
+          renderReveal(choiceId, payload);
+        } catch {
+          loadingMessage.hidden = true;
+          showError("We couldn't load your saved result. Please try again.", () =>
+            restorePreviousChoice(choiceId)
+          );
+        }
+      }
+
+      const savedChoiceId = window.localStorage.getItem(STORAGE_KEY) as ChoiceId | null;
+      if (savedChoiceId && choicesById.has(savedChoiceId)) {
+        restorePreviousChoice(savedChoiceId);
+      }
+    </script>
+
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: #171717;
+        color: #ffffff;
+        padding-block: 2.5rem;
+        line-height: 1.6;
+      }
+
+      h1, h2, h3, legend {
+        font-family: "Poppins", "Inter", system-ui, sans-serif;
+        font-weight: 600;
+        line-height: 1.04;
+        letter-spacing: 0.01em;
+      }
+
+      .wrap {
+        max-width: 1040px;
+        margin-inline: auto;
+        padding-inline: 1.25rem;
+      }
+
+      .intro h1 {
+        font-size: clamp(1.6rem, 4vw, 2.2rem);
+        margin-bottom: 0.25rem;
+      }
+
+      .intro p {
+        color: #ababab;
+        margin-top: 0;
+      }
+
+      .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+
+      .status-line {
+        color: #ababab;
+      }
+
+      fieldset {
+        border: none;
+        padding: 0;
+        margin: 0 0 1.5rem;
+      }
+
+      legend {
+        font-weight: 600;
+        margin-bottom: 0.75rem;
+        padding: 0;
+      }
+
+      .choice-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 0.75rem;
+      }
+
+      .choice-card {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        border: 2px solid #363636;
+        border-radius: 0.75rem;
+        padding: 1rem;
+        cursor: pointer;
+        background: #222222;
+        transition: border-color 0.15s ease, transform 0.15s ease;
+      }
+
+      .choice-card:has(input:checked) {
+        border-color: var(--choice-accent);
+      }
+
+      .choice-card:has(input:focus-visible) {
+        outline: 3px solid var(--activity-accent);
+        outline-offset: 2px;
+      }
+
+      .choice-card input {
+        position: absolute;
+        top: 1rem;
+        right: 1rem;
+        width: 1.1rem;
+        height: 1.1rem;
+      }
+
+      .choice-card input:disabled {
+        cursor: not-allowed;
+      }
+
+      @keyframes art-idle-glow {
+        0%, 100% { opacity: 0.16; transform: scale(0.9); }
+        50% { opacity: 0.3; transform: scale(1.05); }
+      }
+
+      .choice-label {
+        font-weight: 600;
+        padding-right: 1.5rem;
+      }
+
+      .choice-example {
+        font-size: 0.9rem;
+        color: #ababab;
+      }
+
+      #submit-btn,
+      .start-over,
+      #retry-btn {
+        background: var(--activity-accent);
+        color: #ffffff;
+        border: none;
+        border-radius: 0.6rem;
+        padding: 0.75rem 1.25rem;
+        font-weight: 600;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+
+      #submit-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      #submit-btn:focus-visible,
+      .start-over:focus-visible,
+      #retry-btn:focus-visible,
+      .choice-card:focus-within {
+        outline: 3px solid var(--activity-accent);
+        outline-offset: 2px;
+      }
+
+      .error-banner {
+        background: #2a1215;
+        border: 1px solid #ee1d36;
+        border-radius: 0.6rem;
+        padding: 1rem;
+        margin-bottom: 1.5rem;
+      }
+
+      /* [hidden] must win over the flex layout below, or the banner shows
+         even while the hidden attribute is set (equal-specificity clash). */
+      .error-banner:not([hidden]) {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+      }
+
+      .reveal-card {
+        display: grid;
+        grid-template-columns: 2fr 3fr;
+        gap: 2rem;
+        align-items: center;
+        background: #222222;
+        border: 1px solid #363636;
+        border-radius: 1rem;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+      }
+
+      @media (max-width: 640px) {
+        .reveal-card {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      body[data-reveal-effect="burst"] .reveal-card {
+        animation: burst-in 0.5s ease-out;
+      }
+
+      body[data-reveal-effect="fade"] .reveal-card {
+        animation: fade-in 0.5s ease-out;
+      }
+
+      @keyframes burst-in {
+        from {
+          opacity: 0;
+          transform: scale(0.85);
+        }
+        to {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+
+      @keyframes fade-in {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .reveal-card {
+          animation: none !important;
+        }
+      }
+
+      .reveal-art-wrap {
+        position: relative;
+        display: grid;
+        place-items: center;
+        width: 100%;
+        max-width: 280px;
+        aspect-ratio: 1 / 1;
+        margin-inline: auto;
+        border-radius: 1rem;
+        background: #171717;
+      }
+
+      .reveal-art-wrap::before {
+        content: "";
+        position: absolute;
+        inset: 14%;
+        border-radius: 50%;
+        background: var(--choice-accent, var(--activity-accent));
+        filter: blur(28px);
+        opacity: 0.32;
+        animation: art-idle-glow 3.5s ease-in-out infinite;
+      }
+
+      .reveal-art {
+        position: relative;
+        width: 76%;
+        height: 76%;
+        object-fit: contain;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .reveal-art-wrap::before {
+          animation: none;
+        }
+      }
+
+      .reveal-eyebrow {
+        color: #ababab;
+        margin: 0 0 0.25rem;
+      }
+
+      .reveal-example {
+        margin-top: 0.75rem;
+      }
+
+      .resource-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        margin-top: 1rem;
+        color: var(--choice-accent, var(--activity-accent));
+        font-weight: 600;
+        text-decoration: none;
+      }
+
+      .resource-link:hover,
+      .resource-link:focus-visible {
+        text-decoration: underline;
+      }
+
+      .resource-link:focus-visible {
+        outline: 3px solid var(--activity-accent);
+        outline-offset: 3px;
+        border-radius: 0.2rem;
+      }
+
+      .results-panel {
+        background: #222222;
+        border: 1px solid #363636;
+        border-radius: 1rem;
+        padding: 1.5rem;
+      }
+
+      .sample-note {
+        color: #ababab;
+        margin-top: 0;
+      }
+
+      .results-list {
+        list-style: none;
+        margin: 0 0 1.25rem;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      .results-row-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.5rem;
+        font-size: 0.95rem;
+        margin-bottom: 0.35rem;
+      }
+    </style>
+
+    <style is:global>
+      /*
+        DYNAMIC RESULTS STYLES
+
+        Add styles for markup created by buildResultRow() here. This global block
+        allows the styles to reach elements created by the client-side script.
+      */
+    </style>
+  </body>
+</html>

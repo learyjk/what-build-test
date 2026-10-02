@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+.astro/
+
+# cloudflare / wrangler
+.wrangler/
+worker-configuration.d.ts
+
+# env
+.env
+.env.production
+
+# editor / os
+.DS_Store
